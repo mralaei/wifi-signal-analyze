@@ -1,0 +1,113 @@
+import pandas as pd
+import numpy as np
+
+# تنظیمات اولیه
+P0 = -30  # قدرت سیگنال در فاصله 1 متر (dBm) - معمولاً برای روترهای خانگی
+N = 3.5   # ضریب کاهش سیگنال (2 برای فضای باز، 3-4 برای داخل ساختمان)
+
+# نام فایل‌ها و نقاط
+files = {
+    'Point1': 'capture_point1-01.csv',
+    'Point2': 'capture_point2-01.csv',
+    'Point3': 'capture_point3-01.csv'
+}
+
+# مختصات تقریبی نقاط (می‌توانید تغییر دهید)
+# مثال: Point1 در (0,0)، Point2 در (5,0)، Point3 در (0,5)
+points_coords = {
+    'Point1': (0, 0),
+    'Point2': (5, 0),
+    'Point3': (0, 5)
+}
+
+# خواندن و پردازش هر فایل
+data = {}
+for point, file in files.items():
+    try:
+        df = pd.read_csv(file, skiprows=1)  # رد کردن خط عنوان airodump-ng
+        # فقط بخش Access Points (تا قبل از Station)
+        ap_section = df[df['BSSID'].notna() & (df['BSSID'] != 'Station MAC')]
+        ap_section = ap_section[['BSSID', ' ESSID', ' Power', ' channel']].copy()
+        ap_section.columns = ['BSSID', 'ESSID', 'PWR', 'Channel']
+        ap_section['PWR'] = pd.to_numeric(ap_section['PWR'], errors='coerce')
+        ap_section['Point'] = point
+        data[point] = ap_section
+    except Exception as e:
+        print(f"خطا در خواندن {file}: {e}")
+
+# ترکیب داده‌ها
+all_data = pd.concat(data.values(), ignore_index=True)
+
+# حذف ردیف‌های نامعتبر
+all_data = all_data.dropna(subset=['BSSID', 'PWR'])
+all_data['BSSID'] = all_data['BSSID'].str.strip()
+
+# گروه‌بندی بر اساس BSSID
+grouped = all_data.groupby('BSSID').agg({
+    'ESSID': 'first',
+    'Channel': 'first',
+    'PWR': lambda x: dict(zip(
+        all_data[all_data['BSSID'] == x.name]['Point'],
+        x
+    )),
+    'Point': lambda x: list(x)
+}).reset_index()
+
+# محاسبه فاصله تقریبی و جهت
+results = []
+
+for _, row in grouped.iterrows():
+    bssid = row['BSSID']
+    essid = row['ESSID'].strip() if pd.notna(row['ESSID']) else "Hidden"
+    channel = row['Channel']
+    pwr_dict = row['PWR']
+    
+    # محاسبه فاصله در هر نقطه
+    distances = {}
+    for point, pwr in pwr_dict.items():
+        if pwr >= 0:  # داده نامعتبر
+            distances[point] = float('inf')
+            continue
+        loss = P0 - pwr
+        if loss <= 0:
+            d = 1.0
+        else:
+            d = 10 ** (loss / (10 * N))
+        distances[point] = round(d, 2)
+    
+    # بهترین نقطه (نزدیک‌ترین)
+    best_point = min(distances, key=distances.get)
+    best_pwr = pwr_dict.get(best_point, -100)
+    min_distance = distances[best_point]
+    
+    # میانگین فاصله تقریبی
+    avg_distance = round(np.mean(list(distances.values())), 2)
+    
+    results.append({
+        'BSSID': bssid,
+        'ESSID': essid,
+        'Channel': channel,
+        'Point1_PWR': pwr_dict.get('Point1', '-'),
+        'Point2_PWR': pwr_dict.get('Point2', '-'),
+        'Point3_PWR': pwr_dict.get('Point3', '-'),
+        'Point1_Dist(m)': distances.get('Point1', '-'),
+        'Point2_Dist(m)': distances.get('Point2', '-'),
+        'Point3_Dist(m)': distances.get('Point3', '-'),
+        'Nearest_Point': best_point,
+        'Min_Distance(m)': min_distance,
+        'Avg_Distance(m)': avg_distance
+    })
+
+# تبدیل به DataFrame و نمایش
+result_df = pd.DataFrame(results)
+result_df = result_df.sort_values('Min_Distance(m)').reset_index(drop=True)
+
+# نمایش جدول
+print("\n" + "="*100)
+print("تحلیل فاصله و جهت شبکه‌های وای‌فای")
+print("="*100)
+print(result_df.to_string(index=False))
+
+# ذخیره در فایل
+result_df.to_csv('wifi_direction_analysis.csv', index=False, encoding='utf-8-sig')
+print("\nنتایج در فایل 'wifi_direction_analysis.csv' ذخیره شد.")
